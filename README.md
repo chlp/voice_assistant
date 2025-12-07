@@ -63,12 +63,14 @@ sudo systemctl daemon-reload
 
 ```bash
 sudo systemctl start llama.service
+sudo systemctl start voice-assistant.service
 ```
 
 Check the status:
 
 ```bash
 sudo systemctl status llama.service
+sudo systemctl status voice-assistant.service
 ```
 
 ⸻
@@ -88,11 +90,6 @@ Follow logs in realtime:
 
 ```bash
 journalctl -u llama.service -f
-```
-
-Or logs for the voice assistant:
-
-```bash
 journalctl -u voice-assistant.service -f
 ```
 
