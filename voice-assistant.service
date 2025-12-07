@@ -1,0 +1,26 @@
+[Unit]
+Description=Voice Assistant
+After=network.target sound.target
+
+[Service]
+# running as orangepi — systemd will automatically provide the required privileges
+User=orangepi
+WorkingDirectory=/home/orangepi/voice_assistant
+
+# full python3 path is required
+ExecStart=/usr/bin/python3 /home/orangepi/voice_assistant/voice_assistant.py
+
+# privileges similar to sudo:
+# if your script needs to work with audio devices, GPIO, I2C, etc.
+# set the required permissions here
+CapabilityBoundingSet=CAP_SYS_NICE CAP_CHOWN CAP_DAC_READ_SEARCH CAP_SYS_TIME CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_NICE CAP_CHOWN CAP_DAC_READ_SEARCH CAP_SYS_TIME CAP_SYS_ADMIN
+
+# auto-restart
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
