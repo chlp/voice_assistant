@@ -1,270 +1,264 @@
 #!/usr/bin/env python3
 import subprocess
 import time
-import json
 import requests
-import webrtcvad
 import wave
-import struct
+from datetime import datetime
+
 from evdev import InputDevice, categorize, ecodes
+from faster_whisper import WhisperModel
+import numpy as np
+
+# -----------------------------
+# LOGGING
+# -----------------------------
+
+
+def log(msg: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}")
+
 
 # -----------------------------
 # CONFIG
 # -----------------------------
 
-# button AVRCP
+# AVRCP button
 EVENT_DEVICE = "/dev/input/event6"
 PLAY_SCANCODES = {200, 201}
 
-# bluetooth card
+# Bluetooth card
 BT_CARD = "bluez_card.00_22_BB_A1_9F_19"
+BT_SOURCE = "bluez_source.00_22_BB_A1_9F_19.handsfree_head_unit"
 
-# piper voices
+# Piper TTS
 PIPER_BIN = "/home/orangepi/piper/piper"
-TTS_VOICE = "/opt/piper/voices/ru_RU-irina-medium.onnx"
+TTS_VOICE = "/opt/piper/voices/en_US-amy-low.onnx"
+# TTS_VOICE = "/opt/piper/voices/ru_RU-irina-medium.onnx"
 
-# file paths
-RECORD_WAV = "/tmp/query.wav"
-STT_TEXT = "/tmp/query.txt"
-TTS_OUT = "/tmp/answer.wav"
+# File paths
+RECORD_WAV = "/home/orangepi/tmp/query.wav"
+TTS_OUT = "/home/orangepi/tmp/answer.wav"
 
-# whisper
-WHISPER_BIN = "/home/orangepi/whisper.cpp/build/bin/whisper-cli"
-# WHISPER_MODEL = "/home/orangepi/whisper-models/ggml-small-q5_1.bin" # biggest
-WHISPER_MODEL = "/home/orangepi/whisper-models/ggml-base-q5_1.bin" # medium
-# WHISPER_MODEL = "/home/orangepi/whisper-models/ggml-tiny-q8_0.bin" # smallest
-
-# llama server endpoint
+# Llama server endpoint
 LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
+
+# -----------------------------
+# FASTER-WHISPER CONFIG
+# -----------------------------
+
+# Can be tiny/small/medium/large-v3 etc.
+WHISPER_MODEL_ID = "Systran/faster-whisper-small"
+
+# device="cpu" — if no GPU; compute_type="int8" / "int8_float16" saves resources
+log("[STT] Loading Whisper model...")
+whisper_model = WhisperModel(
+    WHISPER_MODEL_ID,
+    device="cpu",
+    compute_type="int8",
+)
 
 
 # -----------------------------
 # HELPERS
 # -----------------------------
 
-def bt_set_profile(profile):
-    print(f"[BT] Set profile: {profile}")
-    subprocess.run([
-        "pactl", "set-card-profile", BT_CARD, profile
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def bt_set_profile(profile: str) -> None:
+    log(f"[BT] Set profile: {profile}")
+    subprocess.run(
+        ["pactl", "set-card-profile", BT_CARD, profile],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
-def start_recording():
-    print("[REC] Start")
-    return subprocess.Popen([
-        "parec",
-        "--device=bluez_source.00_22_BB_A1_9F_19.handsfree_head_unit",
-        "--rate=16000",
-        "--format=s16le",
-        "--channels=1"
-    ], stdout=open(RECORD_WAV, "wb"))
+def record_until_silence() -> None:
+    cmd = [
+        "sox",
+        "-t",
+        "pulseaudio",
+        BT_SOURCE,
+        "-r",
+        "16000",
+        "-c",
+        "1",
+        "-b",
+        "16",
+        "-e",
+        "signed-integer",
+        RECORD_WAV,
+        "silence",
+        "1",
+        "0.1",
+        "3%",
+        "1",
+        "1.5",
+        "3%",
+    ]
+    log("[REC] Running: " + " ".join(cmd))
+    subprocess.run(cmd)
+    log("[REC] Done.")
 
 
-def do_stt():
-    print("[STT] Whisper...")
-    r = subprocess.run([
-        WHISPER_BIN,
-        "-m", WHISPER_MODEL,
-        "-f", RECORD_WAV,
-        "-l", "auto",
-        "--threads", "8",
-        "-otxt"
-    ], text=True, capture_output=True)
-    print("[WHISPER STDERR]", r.stderr)
-    print("[WHISPER STDOUT]", r.stdout)
-    
-    # whisper produces RECORD_WAV.txt
-    with open(RECORD_WAV + ".txt", "r") as f:
-        text = f.read().strip()
-    with open(STT_TEXT, "w") as f:
-        f.write(text)
-    print("[STT] Text:", text)
+def do_stt() -> str:
+    """
+    Simple sequential speech recognition from the recorded WAV file.
+    """
+    log("[STT] faster-whisper...")
+
+    # Read full WAV file
+    with wave.open(RECORD_WAV, "rb") as wf:
+        n_channels = wf.getnchannels()
+        rate = wf.getframerate()
+        frames = wf.getnframes()
+
+        audio_sec = frames / float(rate) if rate > 0 else 0
+        log(f"[STT] Audio: {audio_sec:.2f}s, {rate} Hz, {n_channels} ch")
+
+        raw = wf.readframes(frames)
+
+    # Convert int16 -> float32 in range [-1, 1]
+    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+    # If stereo, take only left channel
+    if n_channels == 2:
+        audio = audio[0::2]
+
+    # Transcribe
+    t0 = time.time()
+    segments, info = whisper_model.transcribe(
+        audio,
+        beam_size=1,
+        language="en",
+        vad_filter=True,
+    )
+
+    text = "".join(seg.text for seg in segments).strip()
+    dt = time.time() - t0
+
+    log(f"[STT] Done in {dt:.2f}s: {text!r}")
     return text
 
 
 def ask_llama(prompt: str) -> str:
-    print("[LLM] Sending prompt...")
+    log("[LLM] Sending prompt...")
 
     data = {
         "model": "qwen2.5-1.5b-instruct",
         "messages": [
             {
                 "role": "system",
-                "content": "You are a multilingual assistant. Respond briefly and to the point, without describing your reasoning."
+                "content": "Answer with short messages in english",
             },
             {
                 "role": "user",
-                "content": prompt
-            }
+                "content": prompt,
+            },
         ],
         "max_tokens": 200,
         "temperature": 0.1,
     }
 
-    r = requests.post(LLAMA_URL, json=data, timeout=60)
-    if r.status_code != 200:
-        print("[LLM] HTTP error:", r.status_code, r.text)
+    try:
+        r = requests.post(LLAMA_URL, json=data, timeout=60)
+    except requests.RequestException as e:
+        log(f"[LLM] Request error: {e}")
         return ""
 
-    j = r.json()
+    if r.status_code != 200:
+        log(f"[LLM] HTTP error: {r.status_code} {r.text}")
+        return ""
 
     try:
+        j = r.json()
         text = j["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print("[LLM] Bad response format:", e, j)
+        log(f"[LLM] Bad response format: {e} {j}")
         text = ""
 
-    print("[LLM] Answer:", text)
+    log("[LLM] Answer: " + text)
     return text
 
 
-def tts_speak(text):
-    print("[TTS] Piper synth...")
-    p = subprocess.Popen([
-        PIPER_BIN,
-        "--model", TTS_VOICE,
-        "--output_file", TTS_OUT
-    ], stdin=subprocess.PIPE, text=True)
+def tts_speak(text: str) -> None:
+    log("[TTS] Piper synth...")
+    p = subprocess.Popen(
+        [
+            PIPER_BIN,
+            "--model",
+            TTS_VOICE,
+            "--output_file",
+            TTS_OUT,
+        ],
+        stdin=subprocess.PIPE,
+        text=True,
+    )
     p.communicate(text)
-    print("[TTS] Play...")
+    log("[TTS] Play...")
     subprocess.run(["aplay", TTS_OUT])
 
-def record_until_silence():
-    print("[REC] Start with VAD...")
-
-    # Configure VAD
-    vad = webrtcvad.Vad()
-    vad.set_mode(2)
-
-    # 16 kHz mono 16bit
-    sample_rate = 16000
-    frame_duration = 30  # ms
-    frame_size = int(sample_rate * frame_duration / 1000) * 2  # bytes
-
-    # Start parec
-    p = subprocess.Popen([
-        "parec",
-        "--device=bluez_source.00_22_BB_A1_9F_19.handsfree_head_unit",
-        "--rate=16000",
-        "--format=s16le",
-        "--channels=1"
-    ], stdout=subprocess.PIPE)
-
-    audio_data = bytearray()
-    silence_start = time.time()
-
-    while True:
-        frame = p.stdout.read(frame_size)
-        if not frame:
-            break
-
-        audio_data.extend(frame)
-
-        # VAD expects bytes of 16-bit samples
-        is_speech = vad.is_speech(frame, sample_rate)
-
-        if is_speech:
-            silence_start = time.time()
-        else:
-            if time.time() - silence_start > 1.0:
-                print("[REC] Silence detected -> stopping")
-                break
-
-    p.terminate()
-
-    # Save WAV
-    with wave.open(RECORD_WAV, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(bytes(audio_data))
-
-    print("[REC] File saved:", RECORD_WAV)
 
 # -----------------------------
 # MAIN LOOP
 # -----------------------------
 
-def main():
-    print("[INFO] Starting voice assistant...")
 
-    # ------------------------------
-    # FORCE A2DP AT STARTUP
-    # ------------------------------
-    print("[BT] Forcing SPACE into A2DP mode...")
+def main() -> None:
+    log("[INFO] Starting voice assistant...")
 
-    subprocess.run(["pactl", "set-card-profile", BT_CARD, "off"])
+    # Force A2DP at startup
+    log("[BT] Forcing device into A2DP mode...")
+
+    bt_set_profile("off")
     time.sleep(0.4)
 
-    subprocess.run(["pactl", "set-card-profile", BT_CARD, "a2dp_sink"])
+    bt_set_profile("a2dp_sink")
     time.sleep(1.0)
 
-    print("[BT] Current profile is:")
+    log("[BT] Current profile is:")
     subprocess.run(["pactl", "get-card-profile", BT_CARD])
 
-    # ------------------------------
-    # PREPARE INPUT DEVICE
-    # ------------------------------
+    # Prepare input device
     dev = InputDevice(EVENT_DEVICE)
-    print("[DEBUG] Using input device:", dev)
-
-    recording_proc = None
-    is_recording = False
-
-    print("[INFO] Waiting for button presses...")
-
-    last_press_time = 0
+    log(f"[INFO] Using input device: {dev}")
+    log("[INFO] Waiting for button presses...")
 
     for event in dev.read_loop():
-        if event.type == ecodes.EV_KEY:
-            key = categorize(event)
-            print("DEBUG:", key.keycode, key.scancode, key.keystate)
+        if event.type != ecodes.EV_KEY:
+            continue
 
-            # PRESS detected
-            if key.scancode in PLAY_SCANCODES and key.keystate == 1:
-                print("[BTN] Press ? start recording")
+        key = categorize(event)
+        log(f"[DEBUG] {key.keycode} {key.scancode} {key.keystate}")
 
-                bt_set_profile("handsfree_head_unit")
-                time.sleep(0.8)
+        if key.scancode in PLAY_SCANCODES and key.keystate == 1:
+            log("[BTN] Press → start recording")
 
-                record_until_silence()
+            bt_set_profile("handsfree_head_unit")
+            time.sleep(0.8)
 
-                text = do_stt()
-                answer = ask_llama(text)
+            # 1) Record new audio
+            record_until_silence()
 
-                bt_set_profile("a2dp_sink")
-                time.sleep(0.7)
+            # 2) Transcribe recorded audio
+            text = do_stt()
+            if not text:
+                log("[STT] Empty text, skipping LLM")
+                continue
 
-                tts_speak(answer)
-                print("[INFO] Ready for next request")
+            # 3) Ask LLM
+            answer = ask_llama(text)
+            if not answer:
+                log("[LLM] Empty answer, skipping TTS")
+                continue
 
-        # ------------------------------------------
-        # HOLD-TO-TALK RELEASE DETECTED BY TIMEOUT
-        # ------------------------------------------
-        if is_recording:
-            if time.time() - last_press_time > 0.5:
-                print("[BTN] HOLD ended ? stopping recording")
+            bt_set_profile("a2dp_sink")
+            time.sleep(0.7)
 
-                is_recording = False
-                if recording_proc:
-                    recording_proc.terminate()
-                    recording_proc = None
+            # 4) Speak answer
+            tts_speak(answer)
+            log("[INFO] Ready for next request")
 
-                print("[REC] Processing STT...")
-                text = do_stt()
-                print("[REC] STT OK:", text)
-
-                print("[LLM] Processing LLM...")
-                answer = ask_llama(text)
-
-                print("[BT] Switching back to A2DP for playback...")
-                bt_set_profile("a2dp_sink")
-                time.sleep(0.7)
-
-                print("[TTS] Speaking answer...")
-                tts_speak(answer)
-
-                print("[INFO] Ready for next press")
 
 if __name__ == "__main__":
     main()
