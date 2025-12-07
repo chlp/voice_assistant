@@ -8,7 +8,10 @@ User=orangepi
 WorkingDirectory=/home/orangepi/voice_assistant
 
 # full python3 path is required
-ExecStart=/usr/bin/python3 /home/orangepi/voice_assistant/voice_assistant.py
+ExecStart=/usr/bin/python3 -u /home/orangepi/voice_assistant/voice_assistant.py
+
+StandardOutput=journal
+StandardError=journal
 
 # privileges similar to sudo:
 # if your script needs to work with audio devices, GPIO, I2C, etc.
