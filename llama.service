@@ -1,5 +1,3 @@
-# /etc/systemd/system/llama.service
-
 [Unit]
 Description=Llama.cpp server
 After=network.target
