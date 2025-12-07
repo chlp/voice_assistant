@@ -1,0 +1,34 @@
+# /etc/systemd/system/llama.service
+
+[Unit]
+Description=Llama.cpp server
+After=network.target
+
+[Service]
+User=orangepi
+WorkingDirectory=/home/orangepi
+
+ExecStart=/home/orangepi/llama.cpp/build/bin/llama-server \
+  -m /home/orangepi/models/qwen2.5-1.5b-instruct/qwen2.5-1.5b-instruct-q5_k_m.gguf \
+  -c 4096 \
+  -t 6 \
+  -ngl 0 \
+  --host 0.0.0.0 \
+  --port 8080
+
+# Automatic restart
+Restart=on-failure
+RestartSec=5
+
+# Restart rate limiting:
+# no more than 5 launches within 10 seconds,
+# otherwise the service will be marked as "crash loop" and stopped
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+# (optional) Slightly limit resources
+# MemoryMax=2G
+# CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
