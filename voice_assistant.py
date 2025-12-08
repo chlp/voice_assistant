@@ -48,9 +48,8 @@ LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
 # -----------------------------
 
 # Can be tiny/small/medium/large-v3 etc.
-WHISPER_MODEL_ID = "Systran/faster-whisper-small"
+WHISPER_MODEL_ID = "Systran/faster-whisper-tiny"
 
-# device="cpu" — if no GPU; compute_type="int8" / "int8_float16" saves resources
 log("[STT] Loading Whisper model...")
 whisper_model = WhisperModel(
     WHISPER_MODEL_ID,
@@ -219,7 +218,6 @@ def main() -> None:
     log("[BT] Current profile is:")
     subprocess.run(["pactl", "get-card-profile", BT_CARD])
 
-    # Prepare input device
     dev = InputDevice(EVENT_DEVICE)
     log(f"[INFO] Using input device: {dev}")
     log("[INFO] Waiting for button presses...")
@@ -235,27 +233,21 @@ def main() -> None:
             log("[BTN] Press → start recording")
 
             bt_set_profile("handsfree_head_unit")
-            time.sleep(0.8)
 
-            # 1) Record new audio
             record_until_silence()
 
-            # 2) Transcribe recorded audio
+            bt_set_profile("a2dp_sink")
+
             text = do_stt()
             if not text:
                 log("[STT] Empty text, skipping LLM")
                 continue
 
-            # 3) Ask LLM
             answer = ask_llama(text)
             if not answer:
                 log("[LLM] Empty answer, skipping TTS")
                 continue
 
-            bt_set_profile("a2dp_sink")
-            time.sleep(0.7)
-
-            # 4) Speak answer
             tts_speak(answer)
             log("[INFO] Ready for next request")
 
